@@ -7,6 +7,7 @@ type Language = "en" | "es";
 type Message = {
     id: number;
     sender: "me" | "other";
+    senderName: string;
     original: string;
     translated: string;
     sourceLanguage?: Language;
@@ -38,8 +39,12 @@ function App() {
     const [myLanguage, setMyLanguage] = useState<Language>("en");
 
     /*
+     * User's display name.
+     */
+    const [myName, setMyName] = useState("");
+
+    /*
      * Chat is closed by default.
-     * The chat button opens/closes the message input and messages.
      */
     const [chatOpen, setChatOpen] = useState(false);
 
@@ -60,9 +65,6 @@ function App() {
 
     /*
      * Automatically scroll to the newest message.
-     *
-     * All messages remain in state.
-     * CSS controls how many messages are visible at once.
      */
     useEffect(() => {
         const container = messagesContainerRef.current;
@@ -262,6 +264,12 @@ function App() {
         console.log("JOIN BUTTON CLICKED");
 
         const cleanRoomId = (selectedRoomId ?? roomId).trim();
+        const cleanName = myName.trim();
+
+        if (!cleanName) {
+            alert("Please enter your name.");
+            return;
+        }
 
         if (!cleanRoomId) {
             alert("Enter a room ID.");
@@ -274,6 +282,7 @@ function App() {
             );
         }
 
+        setMyName(cleanName);
         setRoomId(cleanRoomId);
 
         /*
@@ -315,8 +324,6 @@ function App() {
 
         /*
          * Socket.IO connection.
-         *
-         * Polling is used first for better compatibility.
          */
         const socket = io(signalingUrl, {
             transports: ["polling"],
@@ -362,6 +369,8 @@ function App() {
                 {
                     ...message,
                     sender: "other",
+                    senderName:
+                        message.senderName || "Guest",
                 },
             ]);
         });
@@ -378,6 +387,9 @@ function App() {
                             ? {
                                 ...translatedMessage,
                                 sender: "me",
+                                senderName:
+                                    translatedMessage.senderName ||
+                                    cleanName,
                             }
                             : message
                     )
@@ -725,8 +737,14 @@ function App() {
      */
     const sendMessage = () => {
         const text = input.trim();
+        const cleanName = myName.trim();
 
         if (!text) {
+            return;
+        }
+
+        if (!cleanName) {
+            alert("Please enter your name.");
             return;
         }
 
@@ -740,6 +758,7 @@ function App() {
         const newMessage: Message = {
             id: Date.now(),
             sender: "me",
+            senderName: cleanName,
             original: text,
             translated: "Translating...",
             sourceLanguage: myLanguage,
@@ -788,6 +807,22 @@ function App() {
                             Call, chat and translate between
                             English and Spanish in real time.
                         </p>
+
+                        {/* Name */}
+                        <label className="field-label">
+                            Your name
+                        </label>
+
+                        <input
+                            value={myName}
+                            onChange={(e) =>
+                                setMyName(e.target.value)
+                            }
+                            placeholder="Enter your name"
+                            maxLength={30}
+                            className="name-input"
+                            autoComplete="name"
+                        />
 
                         <label className="field-label">
                             Your language
@@ -961,6 +996,10 @@ function App() {
                                             : "other"
                                     }`}
                                 >
+                                    <div className="overlay-sender">
+                                        {message.senderName}
+                                    </div>
+
                                     <div className="overlay-original">
                                         {message.original}
                                     </div>

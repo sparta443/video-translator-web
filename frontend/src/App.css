@@ -410,9 +410,9 @@ button {
 /* Your message */
 
 .overlay-message.mine {
-  align-self: flex-end;
+  align-self: flex-start;
 
-  margin-right: 24px;
+  margin-right: 0;
 
   border-bottom-right-radius: 5px;
 
@@ -1015,7 +1015,7 @@ button {
   }
 
   .overlay-message.mine {
-    margin-right: 12px;
+    margin-right: 0;
   }
 
   .overlay-original {
@@ -1033,7 +1033,17 @@ button {
 
     border-radius: 22px;
   }
+  .overlay-sender {
+    margin-bottom: 3px;
 
+    font-size: 11px;
+
+    font-weight: 700;
+
+    opacity: 0.75;
+
+    letter-spacing: 0.02em;
+  }
   .overlay-input input {
     height: 44px;
 
