@@ -16,9 +16,12 @@ type Message = {
 function App() {
     const localVideoRef = useRef<HTMLVideoElement | null>(null);
     const remoteVideoRef = useRef<HTMLVideoElement | null>(null);
+    const messagesContainerRef = useRef<HTMLDivElement | null>(null);
 
     const peerConnectionRef = useRef<RTCPeerConnection | null>(null);
     const socketRef = useRef<Socket | null>(null);
+
+    const pendingIceCandidatesRef = useRef<RTCIceCandidateInit[]>([]);
 
     const [stream, setStream] = useState<MediaStream | null>(null);
 
@@ -26,17 +29,26 @@ function App() {
     const [micOn, setMicOn] = useState(true);
 
     const [cameraError, setCameraError] = useState("");
+    const [isCameraLoading, setIsCameraLoading] = useState(true);
 
     const [roomId, setRoomId] = useState("");
     const [joined, setJoined] = useState(false);
     const [connected, setConnected] = useState(false);
 
     const [myLanguage, setMyLanguage] = useState<Language>("en");
-    const [chatOpen, setChatOpen] = useState(true);
+
+    /*
+     * Chat is closed by default.
+     * The chat button opens/closes the message input and messages.
+     */
+    const [chatOpen, setChatOpen] = useState(false);
 
     const [input, setInput] = useState("");
     const [messages, setMessages] = useState<Message[]>([]);
 
+    /*
+     * Read room ID from URL.
+     */
     useEffect(() => {
         const params = new URLSearchParams(window.location.search);
         const roomFromUrl = params.get("room");
@@ -46,25 +58,78 @@ function App() {
         }
     }, []);
 
+    /*
+     * Automatically scroll to the newest message.
+     *
+     * All messages remain in state.
+     * CSS controls how many messages are visible at once.
+     */
+    useEffect(() => {
+        const container = messagesContainerRef.current;
+
+        if (!container) {
+            return;
+        }
+
+        container.scrollTo({
+            top: container.scrollHeight,
+            behavior: "smooth",
+        });
+    }, [messages]);
+
+    /*
+     * Start camera and microphone.
+     */
     useEffect(() => {
         let currentStream: MediaStream | null = null;
 
         async function startCamera() {
+            setIsCameraLoading(true);
+            setCameraError("");
+
             try {
-                const mediaStream = await navigator.mediaDevices.getUserMedia({
-                    video: true,
-                    audio: true,
-                });
+                if (
+                    !navigator.mediaDevices ||
+                    !navigator.mediaDevices.getUserMedia
+                ) {
+                    throw new Error(
+                        "Camera and microphone are not supported by this browser."
+                    );
+                }
+
+                const mediaStream =
+                    await navigator.mediaDevices.getUserMedia({
+                        video: true,
+                        audio: true,
+                    });
 
                 currentStream = mediaStream;
+
                 setStream(mediaStream);
+
+                setCameraOn(
+                    mediaStream
+                        .getVideoTracks()
+                        .some((track) => track.enabled)
+                );
+
+                setMicOn(
+                    mediaStream
+                        .getAudioTracks()
+                        .some((track) => track.enabled)
+                );
 
                 if (localVideoRef.current) {
                     localVideoRef.current.srcObject = mediaStream;
                 }
             } catch (error) {
-                console.error(error);
-                setCameraError("Camera or microphone access failed.");
+                console.error("Camera/microphone error:", error);
+
+                setCameraError(
+                    "Camera or microphone access failed. Please allow permissions and try again."
+                );
+            } finally {
+                setIsCameraLoading(false);
             }
         }
 
@@ -76,6 +141,7 @@ function App() {
             if (socketRef.current) {
                 socketRef.current.removeAllListeners();
                 socketRef.current.disconnect();
+                socketRef.current = null;
             }
 
             if (peerConnectionRef.current) {
@@ -95,6 +161,9 @@ function App() {
         [myLanguage]
     );
 
+    /*
+     * Create WebRTC peer connection.
+     */
     const createPeerConnection = () => {
         if (peerConnectionRef.current) {
             return peerConnectionRef.current;
@@ -108,20 +177,38 @@ function App() {
             ],
         });
 
+        /*
+         * Add local camera and microphone tracks.
+         */
         if (stream) {
             stream.getTracks().forEach((track) => {
                 peerConnection.addTrack(track, stream);
             });
         }
 
+        /*
+         * Receive remote video/audio.
+         */
         peerConnection.ontrack = (event) => {
+            console.log("Remote track received");
+
             if (remoteVideoRef.current) {
                 remoteVideoRef.current.srcObject = event.streams[0];
+
+                remoteVideoRef.current.play().catch((error) => {
+                    console.warn(
+                        "Remote video autoplay was blocked:",
+                        error
+                    );
+                });
             }
 
             setConnected(true);
         };
 
+        /*
+         * ICE candidates.
+         */
         peerConnection.onicecandidate = (event) => {
             if (event.candidate && socketRef.current) {
                 socketRef.current.emit("ice-candidate", {
@@ -131,7 +218,15 @@ function App() {
             }
         };
 
+        /*
+         * WebRTC connection state.
+         */
         peerConnection.onconnectionstatechange = () => {
+            console.log(
+                "WebRTC connection state:",
+                peerConnection.connectionState
+            );
+
             if (peerConnection.connectionState === "connected") {
                 setConnected(true);
             }
@@ -145,16 +240,26 @@ function App() {
             }
         };
 
+        /*
+         * ICE connection state.
+         */
+        peerConnection.oniceconnectionstatechange = () => {
+            console.log(
+                "ICE connection state:",
+                peerConnection.iceConnectionState
+            );
+        };
+
         peerConnectionRef.current = peerConnection;
 
         return peerConnection;
     };
 
-    const joinRoom = (selectedRoomId?: string) => {
-        if (!stream) {
-            alert("Camera is still loading. Please try again.");
-            return;
-        }
+    /*
+     * Join an existing room.
+     */
+    const joinRoom = async (selectedRoomId?: string) => {
+        console.log("JOIN BUTTON CLICKED");
 
         const cleanRoomId = (selectedRoomId ?? roomId).trim();
 
@@ -163,31 +268,94 @@ function App() {
             return;
         }
 
+        if (isCameraLoading) {
+            console.log(
+                "Camera is still loading. Continuing to join room."
+            );
+        }
+
         setRoomId(cleanRoomId);
 
+        /*
+         * Put room ID into URL.
+         */
         const url = new URL(window.location.href);
+
         url.searchParams.set("room", cleanRoomId);
+
         window.history.replaceState({}, "", url.toString());
 
+        /*
+         * Disconnect old socket.
+         */
         if (socketRef.current) {
             socketRef.current.removeAllListeners();
             socketRef.current.disconnect();
+            socketRef.current = null;
         }
 
+        /*
+         * Signaling server.
+         */
         const signalingUrl =
-            import.meta.env.VITE_SIGNALING_URL || "http://localhost:3001";
+            import.meta.env.VITE_SIGNALING_URL ||
+            (window.location.hostname === "localhost"
+                ? "http://localhost:3001"
+                : "");
 
+        console.log("Signaling URL:", signalingUrl);
+
+        if (!signalingUrl) {
+            alert(
+                "Call server is not configured. Please set VITE_SIGNALING_URL in Render."
+            );
+
+            return;
+        }
+
+        /*
+         * Socket.IO connection.
+         *
+         * Polling is used first for better compatibility.
+         */
         const socket = io(signalingUrl, {
-            transports: ["websocket"],
+            transports: ["polling"],
+            reconnection: true,
+            reconnectionAttempts: 5,
         });
 
         socketRef.current = socket;
 
+        /*
+         * Successful socket connection.
+         */
         socket.on("connect", () => {
+            console.log("Socket connected:", socket.id);
+
             socket.emit("join-room", cleanRoomId);
+
             setJoined(true);
         });
 
+        /*
+         * Socket connection error.
+         */
+        socket.on("connect_error", (error) => {
+            console.error(
+                "Signaling connection failed:",
+                error.message
+            );
+
+            console.error("Full socket error:", error);
+
+            alert(
+                `Signaling connection failed: ${error.message}`
+            );
+        });
+
+        /*
+         * Chat message received from another user.
+         */
         socket.on("chat-message", (message: Message) => {
             setMessages((previous) => [
                 ...previous,
@@ -198,19 +366,28 @@ function App() {
             ]);
         });
 
-        socket.on("chat-message-translated", (translatedMessage: Message) => {
-            setMessages((previous) =>
-                previous.map((message) =>
-                    message.id === translatedMessage.id
-                        ? {
-                            ...translatedMessage,
-                            sender: "me",
-                        }
-                        : message
-                )
-            );
-        });
+        /*
+         * Translated message received for our own message.
+         */
+        socket.on(
+            "chat-message-translated",
+            (translatedMessage: Message) => {
+                setMessages((previous) =>
+                    previous.map((message) =>
+                        message.id === translatedMessage.id
+                            ? {
+                                ...translatedMessage,
+                                sender: "me",
+                            }
+                            : message
+                    )
+                );
+            }
+        );
 
+        /*
+         * Translation error.
+         */
         socket.on(
             "chat-translation-error",
             ({
@@ -224,7 +401,8 @@ function App() {
                         message.id === messageId
                             ? {
                                 ...message,
-                                translated: "Translation failed",
+                                translated:
+                                    "Translation failed",
                             }
                             : message
                     )
@@ -232,97 +410,251 @@ function App() {
             }
         );
 
+        /*
+         * Another user joined.
+         *
+         * This user becomes the offer creator.
+         */
         socket.on("user-joined", async () => {
-            const peerConnection = createPeerConnection();
+            try {
+                console.log("Another user joined");
 
-            const offer = await peerConnection.createOffer();
-            await peerConnection.setLocalDescription(offer);
+                const peerConnection =
+                    createPeerConnection();
 
-            socket.emit("offer", {
-                roomId: cleanRoomId,
-                offer,
-            });
+                const offer =
+                    await peerConnection.createOffer();
+
+                await peerConnection.setLocalDescription(
+                    offer
+                );
+
+                socket.emit("offer", {
+                    roomId: cleanRoomId,
+                    offer,
+                });
+            } catch (error) {
+                console.error(
+                    "Error creating offer:",
+                    error
+                );
+            }
         });
 
+        /*
+         * Receive offer.
+         */
         socket.on(
             "offer",
             async (offer: RTCSessionDescriptionInit) => {
-                const peerConnection = createPeerConnection();
+                try {
+                    console.log("Offer received");
 
-                await peerConnection.setRemoteDescription(
-                    new RTCSessionDescription(offer)
-                );
+                    const peerConnection =
+                        createPeerConnection();
 
-                const answer = await peerConnection.createAnswer();
-                await peerConnection.setLocalDescription(answer);
+                    await peerConnection.setRemoteDescription(
+                        new RTCSessionDescription(offer)
+                    );
 
-                socket.emit("answer", {
-                    roomId: cleanRoomId,
-                    answer,
-                });
+                    /*
+                     * Add ICE candidates that arrived early.
+                     */
+                    for (const candidate of
+                        pendingIceCandidatesRef.current) {
+                        try {
+                            await peerConnection.addIceCandidate(
+                                new RTCIceCandidate(candidate)
+                            );
+                        } catch (error) {
+                            console.error(
+                                "Pending ICE candidate error:",
+                                error
+                            );
+                        }
+                    }
+
+                    pendingIceCandidatesRef.current = [];
+
+                    const answer =
+                        await peerConnection.createAnswer();
+
+                    await peerConnection.setLocalDescription(
+                        answer
+                    );
+
+                    socket.emit("answer", {
+                        roomId: cleanRoomId,
+                        answer,
+                    });
+                } catch (error) {
+                    console.error(
+                        "Error handling offer:",
+                        error
+                    );
+                }
             }
         );
 
+        /*
+         * Receive answer.
+         */
         socket.on(
             "answer",
             async (answer: RTCSessionDescriptionInit) => {
-                const peerConnection = peerConnectionRef.current;
+                try {
+                    console.log("Answer received");
 
-                if (!peerConnection) return;
+                    const peerConnection =
+                        peerConnectionRef.current;
 
-                await peerConnection.setRemoteDescription(
-                    new RTCSessionDescription(answer)
-                );
+                    if (!peerConnection) {
+                        return;
+                    }
+
+                    await peerConnection.setRemoteDescription(
+                        new RTCSessionDescription(answer)
+                    );
+
+                    /*
+                     * Add queued ICE candidates.
+                     */
+                    for (const candidate of
+                        pendingIceCandidatesRef.current) {
+                        try {
+                            await peerConnection.addIceCandidate(
+                                new RTCIceCandidate(candidate)
+                            );
+                        } catch (error) {
+                            console.error(
+                                "Pending ICE candidate error:",
+                                error
+                            );
+                        }
+                    }
+
+                    pendingIceCandidatesRef.current = [];
+                } catch (error) {
+                    console.error(
+                        "Error handling answer:",
+                        error
+                    );
+                }
             }
         );
 
+        /*
+         * Receive ICE candidate.
+         */
         socket.on(
             "ice-candidate",
             async (candidate: RTCIceCandidateInit) => {
-                const peerConnection = peerConnectionRef.current;
+                const peerConnection =
+                    peerConnectionRef.current;
 
-                if (!peerConnection) return;
+                if (!peerConnection) {
+                    pendingIceCandidatesRef.current.push(
+                        candidate
+                    );
+
+                    return;
+                }
+
+                /*
+                 * If remote description isn't available yet,
+                 * queue the candidate.
+                 */
+                if (!peerConnection.remoteDescription) {
+                    pendingIceCandidatesRef.current.push(
+                        candidate
+                    );
+
+                    return;
+                }
 
                 try {
                     await peerConnection.addIceCandidate(
                         new RTCIceCandidate(candidate)
                     );
                 } catch (error) {
-                    console.error("ICE candidate error:", error);
+                    console.error(
+                        "ICE candidate error:",
+                        error
+                    );
                 }
             }
         );
 
-        socket.on("disconnect", () => {
+        /*
+         * Socket disconnected.
+         */
+        socket.on("disconnect", (reason) => {
+            console.log(
+                "Socket disconnected:",
+                reason
+            );
+
             setConnected(false);
         });
     };
 
+    /*
+     * Create a new room.
+     */
     const createRoom = () => {
-        const newRoomId = Math.random().toString(36).slice(2, 8).toUpperCase();
+        const newRoomId = Math.random()
+            .toString(36)
+            .slice(2, 8)
+            .toUpperCase();
+
+        console.log("Creating room:", newRoomId);
+
         joinRoom(newRoomId);
     };
 
+    /*
+     * Share room.
+     */
     const shareRoom = async () => {
+        if (!roomId.trim()) {
+            return;
+        }
+
         const shareUrl = new URL(window.location.href);
-        shareUrl.searchParams.set("room", roomId.trim());
+
+        shareUrl.searchParams.set(
+            "room",
+            roomId.trim()
+        );
 
         try {
             if (navigator.share) {
                 await navigator.share({
                     title: "Join my Video Translate call",
-                    text: "Join my video call with live English ↔ Spanish translation.",
+                    text:
+                        "Join my video call with live English ↔ Spanish translation.",
                     url: shareUrl.toString(),
                 });
-            } else {
-                await navigator.clipboard.writeText(shareUrl.toString());
+            } else if (navigator.clipboard) {
+                await navigator.clipboard.writeText(
+                    shareUrl.toString()
+                );
+
                 alert("Room link copied to clipboard.");
+            } else {
+                alert(shareUrl.toString());
             }
         } catch (error) {
-            console.error("Share failed:", error);
+            console.error(
+                "Share failed:",
+                error
+            );
         }
     };
 
+    /*
+     * Leave call.
+     */
     const leaveCall = () => {
         socketRef.current?.removeAllListeners();
         socketRef.current?.disconnect();
@@ -331,6 +663,8 @@ function App() {
         peerConnectionRef.current?.close();
         peerConnectionRef.current = null;
 
+        pendingIceCandidatesRef.current = [];
+
         if (remoteVideoRef.current) {
             remoteVideoRef.current.srcObject = null;
         }
@@ -338,34 +672,63 @@ function App() {
         setJoined(false);
         setConnected(false);
         setMessages([]);
+        setChatOpen(false);
+        setInput("");
 
         const url = new URL(window.location.href);
+
         url.searchParams.delete("room");
-        window.history.replaceState({}, "", url.toString());
+
+        window.history.replaceState(
+            {},
+            "",
+            url.toString()
+        );
     };
 
+    /*
+     * Toggle camera.
+     */
     const toggleCamera = () => {
-        const videoTrack = stream?.getVideoTracks()[0];
+        const videoTrack =
+            stream?.getVideoTracks()[0];
 
-        if (!videoTrack) return;
+        if (!videoTrack) {
+            alert("Camera is not available.");
+            return;
+        }
 
         videoTrack.enabled = !videoTrack.enabled;
+
         setCameraOn(videoTrack.enabled);
     };
 
+    /*
+     * Toggle microphone.
+     */
     const toggleMic = () => {
-        const audioTrack = stream?.getAudioTracks()[0];
+        const audioTrack =
+            stream?.getAudioTracks()[0];
 
-        if (!audioTrack) return;
+        if (!audioTrack) {
+            alert("Microphone is not available.");
+            return;
+        }
 
         audioTrack.enabled = !audioTrack.enabled;
+
         setMicOn(audioTrack.enabled);
     };
 
+    /*
+     * Send chat message.
+     */
     const sendMessage = () => {
         const text = input.trim();
 
-        if (!text) return;
+        if (!text) {
+            return;
+        }
 
         const socket = socketRef.current;
 
@@ -380,10 +743,14 @@ function App() {
             original: text,
             translated: "Translating...",
             sourceLanguage: myLanguage,
-            targetLanguage: myLanguage === "en" ? "es" : "en",
+            targetLanguage:
+                myLanguage === "en" ? "es" : "en",
         };
 
-        setMessages((previous) => [...previous, newMessage]);
+        setMessages((previous) => [
+            ...previous,
+            newMessage,
+        ]);
 
         socket.emit("chat-message", {
             roomId: roomId.trim(),
@@ -396,6 +763,7 @@ function App() {
 
     return (
         <div className="app">
+            {/* Remote video */}
             <video
                 ref={remoteVideoRef}
                 autoPlay
@@ -403,57 +771,109 @@ function App() {
                 className="remote-video"
             />
 
+            {/* Lobby */}
             {!joined && (
                 <div className="lobby-overlay">
                     <div className="lobby-card">
-                        <div className="lobby-brand">Video Translate</div>
-                        <h1>Video calls without the language barrier</h1>
+                        <div className="lobby-brand">
+                            Video Translate
+                        </div>
+
+                        <h1>
+                            Video calls without the language
+                            barrier
+                        </h1>
+
                         <p className="lobby-subtitle">
-                            Call, chat and translate between English and Spanish in real time.
+                            Call, chat and translate between
+                            English and Spanish in real time.
                         </p>
 
-                        <label className="field-label">Your language</label>
+                        <label className="field-label">
+                            Your language
+                        </label>
+
                         <select
                             value={myLanguage}
-                            onChange={(e) => setMyLanguage(e.target.value as Language)}
+                            onChange={(e) =>
+                                setMyLanguage(
+                                    e.target.value as Language
+                                )
+                            }
                             className="language-select"
                         >
-                            <option value="en">English</option>
-                            <option value="es">Español</option>
+                            <option value="en">
+                                English
+                            </option>
+
+                            <option value="es">
+                                Español
+                            </option>
                         </select>
 
-                        <button className="primary-action" onClick={createRoom}>
-                            Create new room
+                        <button
+                            className="primary-action"
+                            onClick={createRoom}
+                            type="button"
+                        >
+                            {isCameraLoading
+                                ? "Preparing camera..."
+                                : "Create new room"}
                         </button>
 
                         <div className="or-divider">
-                            <span>or join an existing room</span>
+                            <span>
+                                or join an existing room
+                            </span>
                         </div>
 
                         <div className="join-row">
                             <input
                                 value={roomId}
-                                onChange={(e) => setRoomId(e.target.value)}
+                                onChange={(e) =>
+                                    setRoomId(e.target.value)
+                                }
                                 placeholder="Enter room ID"
+                                autoCapitalize="characters"
+                                autoCorrect="off"
+                                spellCheck={false}
                             />
-                            <button onClick={() => joinRoom()}>Join</button>
+
+                            <button
+                                onClick={() => joinRoom()}
+                                type="button"
+                            >
+                                Join
+                            </button>
                         </div>
 
                         {cameraError && (
-                            <div className="lobby-error">{cameraError}</div>
+                            <div className="lobby-error">
+                                {cameraError}
+                            </div>
                         )}
                     </div>
                 </div>
             )}
 
+            {/* Waiting for other user */}
             {joined && !connected && (
                 <div className="remote-placeholder">
                     <div className="waiting-card">
-                        <h2>Waiting for the other person…</h2>
+                        <h2>
+                            Waiting for the other person…
+                        </h2>
+
                         <p>
-                            Room <strong>{roomId}</strong>
+                            Room{" "}
+                            <strong>{roomId}</strong>
                         </p>
-                        <button className="share-room-button" onClick={shareRoom}>
+
+                        <button
+                            className="share-room-button"
+                            onClick={shareRoom}
+                            type="button"
+                        >
                             Share room link
                         </button>
                     </div>
@@ -462,6 +882,7 @@ function App() {
 
             <div className="video-gradient" />
 
+            {/* Active call UI */}
             {joined && (
                 <>
                     <header className="top-bar">
@@ -469,27 +890,42 @@ function App() {
                             <h2>Video Translate</h2>
 
                             <span className="status">
-                <span
-                    className={`status-dot ${connected ? "online" : ""}`}
-                />
-                                {connected ? "Connected" : "Waiting..."}
-              </span>
+                                <span
+                                    className={`status-dot ${
+                                        connected
+                                            ? "online"
+                                            : ""
+                                    }`}
+                                />
+
+                                {connected
+                                    ? "Connected"
+                                    : "Waiting..."}
+                            </span>
                         </div>
 
                         <div className="top-actions">
-                            <button className="share-top-button" onClick={shareRoom}>
+                            <button
+                                className="share-top-button"
+                                onClick={shareRoom}
+                                type="button"
+                            >
                                 Share
                             </button>
 
                             <div className="language-pill">
-                                {languageLabel} ↔ {targetLanguageLabel}
+                                {languageLabel} ↔{" "}
+                                {targetLanguageLabel}
                             </div>
                         </div>
                     </header>
 
+                    {/* Local video */}
                     <div className="self-video">
                         {cameraError ? (
-                            <div className="camera-placeholder">{cameraError}</div>
+                            <div className="camera-placeholder">
+                                {cameraError}
+                            </div>
                         ) : (
                             <video
                                 ref={localVideoRef}
@@ -500,58 +936,56 @@ function App() {
                             />
                         )}
 
-                        <span className="self-label">You</span>
+                        <span className="self-label">
+                            You
+                        </span>
                     </div>
 
-                    {chatOpen && (
-                        <section className="chat-panel">
-                            <div className="chat-header">
-                                <div>
-                                    <strong>Live Translation</strong>
-                                    <span>
-                    {languageLabel} ↔ {targetLanguageLabel}
-                  </span>
-                                </div>
-
-                                <button
-                                    className="minimize-button"
-                                    onClick={() => setChatOpen(false)}
-                                    aria-label="Close chat"
+                    {/* Transparent chat overlay */}
+                    <section
+                        className={`chat-overlay ${
+                            chatOpen ? "open" : ""
+                        }`}
+                    >
+                        <div
+                            className="overlay-messages"
+                            ref={messagesContainerRef}
+                            aria-live="polite"
+                        >
+                            {messages.map((message) => (
+                                <div
+                                    key={message.id}
+                                    className={`overlay-message ${
+                                        message.sender === "me"
+                                            ? "mine"
+                                            : "other"
+                                    }`}
                                 >
-                                    ×
-                                </button>
-                            </div>
-
-                            <div className="messages">
-                                {messages.length === 0 && (
-                                    <div className="empty-chat">
-                                        Send a message. It will be translated automatically.
+                                    <div className="overlay-original">
+                                        {message.original}
                                     </div>
-                                )}
 
-                                {messages.map((message) => (
-                                    <div
-                                        key={message.id}
-                                        className={`message-row ${
-                                            message.sender === "me" ? "mine" : ""
-                                        }`}
-                                    >
-                                        <div className="message-bubble">
-                                            <div className="original">{message.original}</div>
-                                            <div className="translation">
-                                                {message.translated}
-                                            </div>
+                                    {message.translated && (
+                                        <div className="overlay-translation">
+                                            {message.translated}
                                         </div>
-                                    </div>
-                                ))}
-                            </div>
+                                    )}
+                                </div>
+                            ))}
+                        </div>
 
-                            <div className="message-input">
+                        {/* Message input */}
+                        {chatOpen && (
+                            <div className="overlay-input">
                                 <input
                                     value={input}
-                                    onChange={(e) => setInput(e.target.value)}
+                                    onChange={(e) =>
+                                        setInput(e.target.value)
+                                    }
                                     onKeyDown={(e) => {
-                                        if (e.key === "Enter") {
+                                        if (
+                                            e.key === "Enter"
+                                        ) {
                                             sendMessage();
                                         }
                                     }}
@@ -562,28 +996,58 @@ function App() {
                                     }
                                 />
 
-                                <button onClick={sendMessage}>➤</button>
+                                <button
+                                    onClick={sendMessage}
+                                    type="button"
+                                    aria-label="Send message"
+                                >
+                                    ➤
+                                </button>
                             </div>
-                        </section>
-                    )}
+                        )}
+                    </section>
 
+                    {/* Call controls */}
                     <div className="call-controls">
-                        <button onClick={toggleMic}>
+                        <button
+                            onClick={toggleMic}
+                            type="button"
+                            aria-label="Toggle microphone"
+                        >
                             {micOn ? "🎤" : "🔇"}
                         </button>
 
-                        <button onClick={toggleCamera}>
+                        <button
+                            onClick={toggleCamera}
+                            type="button"
+                            aria-label="Toggle camera"
+                        >
                             {cameraOn ? "📹" : "🚫"}
                         </button>
 
                         <button
-                            className={chatOpen ? "control-active" : ""}
-                            onClick={() => setChatOpen((value) => !value)}
+                            className={
+                                chatOpen
+                                    ? "control-active"
+                                    : ""
+                            }
+                            onClick={() =>
+                                setChatOpen(
+                                    (value) => !value
+                                )
+                            }
+                            type="button"
+                            aria-label="Toggle chat"
                         >
                             💬
                         </button>
 
-                        <button className="hangup" onClick={leaveCall}>
+                        <button
+                            className="hangup"
+                            onClick={leaveCall}
+                            type="button"
+                            aria-label="Leave call"
+                        >
                             ☎
                         </button>
                     </div>
